@@ -21,6 +21,30 @@ const LOCK_SUFFIX = ".asp.lock";
 const LOCK_STALE_MS = 10_000;
 const BACKUPS_TO_KEEP = 5;
 
+/**
+ * Describes the host whose syntax the *alias string* is rendered in and parsed
+ * back from. `path` is `path.posix`/`path.win32` chosen explicitly rather than
+ * read from `process.platform`, so win32 rendering is testable on Linux/CI.
+ *
+ * Scope boundary: this only governs the alias text. Every filesystem operation
+ * in this module (lock, backup, temp file, rename) keeps using the real `path`
+ * import and the real OS, via `host.homeDir` as a plain string.
+ */
+export interface HostPaths {
+  /** Absolute home directory, written in the host's own syntax. */
+  homeDir: string;
+  platform: "posix" | "win32";
+  /** path.posix or path.win32 — chosen explicitly so win32 output is testable on any host. */
+  path: typeof path;
+}
+
+export function hostPathsFor(homeDir: string, platform: NodeJS.Platform): HostPaths {
+  if (platform === "win32") {
+    return { homeDir, platform: "win32", path: path.win32 };
+  }
+  return { homeDir, platform: "posix", path: path.posix };
+}
+
 export interface AliasEntry {
   alias: string;
   /** Always absolute: `$HOME` is expanded on read and re-introduced on write. */
@@ -77,8 +101,8 @@ function unescapeFromDoubleQuotes(value: string): string {
   return value.replace(/\\([\\$`"])/g, "$1");
 }
 
-function isUnderHome(target: string, homeDir: string): boolean {
-  return target === homeDir || target.startsWith(homeDir + path.sep);
+function isUnderHome(target: string, host: HostPaths): boolean {
+  return target === host.homeDir || target.startsWith(host.homeDir + host.path.sep);
 }
 
 // ---------------------------------------------------------------------------
@@ -86,27 +110,31 @@ function isUnderHome(target: string, homeDir: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Render the config-dir argument. Paths under the home directory are emitted as
- * `$HOME/...` so the line survives a moved or renamed home; `$HOME` expands when
- * the alias runs, not when it is defined, so the surrounding single quotes are
- * no obstacle.
+ * Render the config-dir argument. On posix, paths under the home directory are
+ * emitted as `$HOME/...` so the line survives a moved or renamed home; `$HOME`
+ * expands when the alias runs, not when it is defined, so the surrounding
+ * single quotes are no obstacle. On win32 the `$HOME` branch is skipped
+ * entirely: `claude.exe` needs the absolute path in its own syntax.
  */
-function renderProfileDirToken(profileDir: string, homeDir: string): string {
-  if (isUnderHome(profileDir, homeDir)) {
-    return `$HOME${escapeForDoubleQuotes(profileDir.slice(homeDir.length))}`;
+function renderProfileDirToken(profileDir: string, host: HostPaths): string {
+  if (host.platform !== "win32" && isUnderHome(profileDir, host)) {
+    // Reached only on posix, where host.path.sep is already "/" — the
+    // relative suffix needs no separator conversion.
+    const suffix = profileDir.slice(host.homeDir.length);
+    return `$HOME${escapeForDoubleQuotes(suffix)}`;
   }
   return escapeForDoubleQuotes(profileDir);
 }
 
-export function renderAliasLine(entry: AliasEntry, homeDir: string): string {
-  if (entry.profileDir.includes("\n") || homeDir.includes("\n")) {
+export function renderAliasLine(entry: AliasEntry, host: HostPaths): string {
+  if (entry.profileDir.includes("\n") || host.homeDir.includes("\n")) {
     throw new ValidationError(
       "refusing to write an alias for a path containing a newline: it cannot be expressed safely in a shell rc file",
     );
   }
   validateAliasName(entry.alias);
 
-  const body = `${entry.envVar}="${renderProfileDirToken(entry.profileDir, homeDir)}" ${entry.binary}`;
+  const body = `${entry.envVar}="${renderProfileDirToken(entry.profileDir, host)}" ${entry.binary}`;
   return `alias ${entry.alias}=${shellSingleQuote(body)}`;
 }
 
@@ -114,7 +142,7 @@ const ALIAS_LINE_PATTERN = /^alias ([A-Za-z0-9_-]+)=(.+)$/;
 const ALIAS_BODY_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)="(.*)" (\S+)$/;
 
 /** Returns null when the line is not an alias asp could have written. */
-export function parseAliasLine(line: string, homeDir: string): AliasEntry | null {
+export function parseAliasLine(line: string, host: HostPaths): AliasEntry | null {
   const outer = ALIAS_LINE_PATTERN.exec(line);
   if (!outer) return null;
 
@@ -137,13 +165,20 @@ export function parseAliasLine(line: string, homeDir: string): AliasEntry | null
   // Accept both what we render and what a user may have typed by hand.
   let profileDir: string;
   if (rawPath === "$HOME" || rawPath === "${HOME}") {
-    profileDir = homeDir;
+    profileDir = host.homeDir;
   } else if (rawPath.startsWith("$HOME/")) {
-    profileDir = path.join(homeDir, rawPath.slice("$HOME/".length));
+    profileDir = host.path.join(host.homeDir, rawPath.slice("$HOME/".length));
   } else if (rawPath.startsWith("${HOME}/")) {
-    profileDir = path.join(homeDir, rawPath.slice("${HOME}/".length));
-  } else if (path.isAbsolute(rawPath)) {
-    profileDir = path.normalize(rawPath);
+    profileDir = host.path.join(host.homeDir, rawPath.slice("${HOME}/".length));
+  } else if (host.platform === "win32" && /^\/[A-Za-z](\/|$)/.test(rawPath)) {
+    // path.win32.isAbsolute/normalize treat a leading "/c/..." as a path
+    // *named* "c" under the current drive's root, not drive C: — exactly the
+    // Git-Bash-style path a hand-written or pre-Phase-1 line could carry.
+    // Refuse to guess; the line survives untouched as an unknown line instead
+    // of being silently rewritten to the wrong path on the next write.
+    return null;
+  } else if (host.path.isAbsolute(rawPath)) {
+    profileDir = host.path.normalize(rawPath);
   } else {
     return null;
   }
@@ -260,7 +295,7 @@ function assertSupportedVersion(version: number): void {
 
 const EMPTY_BLOCK: RcBlock = { present: false, version: BLOCK_VERSION, entries: [], unknownLines: [] };
 
-export function parseBlock(content: string, homeDir: string): RcBlock {
+export function parseBlock(content: string, host: HostPaths): RcBlock {
   const located = locateBlock(scanLines(content));
   if (!located) return { ...EMPTY_BLOCK, entries: [], unknownLines: [] };
 
@@ -270,7 +305,7 @@ export function parseBlock(content: string, homeDir: string): RcBlock {
   const unknownLines: string[] = [];
 
   for (const line of located.bodyLines) {
-    const entry = parseAliasLine(line.text, homeDir);
+    const entry = parseAliasLine(line.text, host);
     if (entry) {
       entries.push(entry);
     } else if (line.text.length > 0) {
@@ -282,21 +317,21 @@ export function parseBlock(content: string, homeDir: string): RcBlock {
 }
 
 /** Read the managed block from disk. A missing rc file simply has no block. */
-export function readBlock(rcPath: string, homeDir: string): RcBlock {
+export function readBlock(rcPath: string, host: HostPaths): RcBlock {
   let content: string;
   try {
     content = fs.readFileSync(rcPath, "utf8");
   } catch {
     return { ...EMPTY_BLOCK, entries: [], unknownLines: [] };
   }
-  return parseBlock(content, homeDir);
+  return parseBlock(content, host);
 }
 
-export function serializeBlock(block: RcBlock, homeDir: string, lineEnding: string): string {
+export function serializeBlock(block: RcBlock, host: HostPaths, lineEnding: string): string {
   const sorted = [...block.entries].sort((a, b) => a.alias.localeCompare(b.alias));
   const lines = [
     blockStartMarker(BLOCK_VERSION),
-    ...sorted.map((entry) => renderAliasLine(entry, homeDir)),
+    ...sorted.map((entry) => renderAliasLine(entry, host)),
     ...block.unknownLines,
     blockEndMarker(BLOCK_VERSION),
   ];
@@ -389,6 +424,19 @@ function acquireLock(rcPath: string): Lock {
   throw new ValidationError(`could not acquire the lock on ${rcPath}`);
 }
 
+/**
+ * ISO 8601 sorts lexicographically — but only within one filename convention.
+ * `:` (0x3A) sorts after `-` (0x2D), so a backup written before the ":" → "-"
+ * rename (still valid on posix, where colons never broke the write) would
+ * sort *after* every new dash-named backup regardless of which is actually
+ * newer. Comparing with `:` normalized to `-` keeps chronological order
+ * across that boundary.
+ */
+function compareBackupNames(a: string, b: string): number {
+  const normalize = (name: string): string => name.replace(/:/g, "-");
+  return normalize(a) < normalize(b) ? -1 : normalize(a) > normalize(b) ? 1 : 0;
+}
+
 function pruneBackups(dir: string, basename: string): void {
   let names: string[];
   try {
@@ -396,8 +444,7 @@ function pruneBackups(dir: string, basename: string): void {
   } catch {
     return;
   }
-  // ISO 8601 sorts lexicographically, so the newest names sort last.
-  const mine = names.filter((name) => name.startsWith(`${basename}.`)).sort();
+  const mine = names.filter((name) => name.startsWith(`${basename}.`)).sort(compareBackupNames);
   for (const name of mine.slice(0, Math.max(0, mine.length - BACKUPS_TO_KEEP))) {
     try {
       fs.unlinkSync(path.join(dir, name));
@@ -417,7 +464,12 @@ function writeBackup(realRcPath: string, content: Buffer, homeDir: string): stri
   fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
 
   const basename = path.basename(realRcPath);
-  const stamp = new Date().toISOString();
+  // ":" is invalid in Windows filenames (reserved for NTFS alternate data
+  // streams); swap for "-" so ISO 8601 timestamps stay filename-safe on every
+  // platform. A backup written before this change may still carry a raw ":"
+  // — compareBackupNames normalizes both before comparing so ordering across
+  // that boundary stays chronological.
+  const stamp = new Date().toISOString().replace(/:/g, "-");
 
   for (let suffix = 0; suffix < 100; suffix += 1) {
     const target = path.join(dir, suffix === 0 ? `${basename}.${stamp}` : `${basename}.${stamp}.${suffix}`);
@@ -529,7 +581,7 @@ function atomicWrite(realPath: string, content: string, mode: number): void {
  */
 export function rewriteBlock(
   rcPath: string,
-  homeDir: string,
+  host: HostPaths,
   mutate: (block: RcBlock) => RcBlock,
 ): RcWriteResult {
   const lock = acquireLock(rcPath);
@@ -557,13 +609,13 @@ export function rewriteBlock(
 
     // Parsing before anything else: damaged markers must stop the run while the
     // file is still untouched.
-    const block = parseBlock(original, homeDir);
+    const block = parseBlock(original, host);
     const next = mutate(block);
 
     const rendered =
       next.entries.length === 0 && next.unknownLines.length === 0
         ? null
-        : serializeBlock(next, homeDir, lineEnding);
+        : serializeBlock(next, host, lineEnding);
     const updated = spliceBlock(original, rendered, lineEnding);
 
     if (updated === original) {
@@ -583,9 +635,9 @@ export function rewriteBlock(
 
     let backupPath: string | null = null;
     if (existing && existing.content.length > 0) {
-      backupPath = writeBackup(realPath, existing.content, homeDir);
+      backupPath = writeBackup(realPath, existing.content, host.homeDir);
     } else if (existing) {
-      assertEmptyFileIsExpected(realPath, homeDir);
+      assertEmptyFileIsExpected(realPath, host.homeDir);
     }
 
     atomicWrite(realPath, updated, existing ? existing.stats.mode & 0o777 : FILE_MODE);
@@ -608,7 +660,10 @@ function assertEmptyFileIsExpected(realPath: string, homeDir: string): void {
   } catch {
     return;
   }
-  const latest = names.filter((name) => name.startsWith(`${basename}.`)).sort().pop();
+  const latest = names
+    .filter((name) => name.startsWith(`${basename}.`))
+    .sort(compareBackupNames)
+    .pop();
   if (!latest) return;
 
   if (fs.statSync(path.join(dir, latest)).size > 0) {
@@ -639,17 +694,17 @@ function spliceBlock(content: string, rendered: string | null, lineEnding: strin
   return content.endsWith("\n") ? content + rendered : content + lineEnding + rendered;
 }
 
-export function upsertAlias(rcPath: string, homeDir: string, entry: AliasEntry): RcWriteResult {
+export function upsertAlias(rcPath: string, host: HostPaths, entry: AliasEntry): RcWriteResult {
   validateAliasName(entry.alias);
-  return rewriteBlock(rcPath, homeDir, (block) => ({
+  return rewriteBlock(rcPath, host, (block) => ({
     ...block,
     present: true,
     entries: [...block.entries.filter((existing) => existing.alias !== entry.alias), entry],
   }));
 }
 
-export function removeAlias(rcPath: string, homeDir: string, alias: string): RcWriteResult {
-  return rewriteBlock(rcPath, homeDir, (block) => ({
+export function removeAlias(rcPath: string, host: HostPaths, alias: string): RcWriteResult {
+  return rewriteBlock(rcPath, host, (block) => ({
     ...block,
     entries: block.entries.filter((entry) => entry.alias !== alias),
   }));

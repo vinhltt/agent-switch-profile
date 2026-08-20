@@ -112,12 +112,19 @@ export function readProfileMeta(dir: string): ProfileMetaResult {
 }
 
 /**
- * Presence of the credentials file is the only signal available on disk. Other
- * platforms keep credentials elsewhere (macOS Keychain), so they report unknown
- * rather than a confident wrong answer.
+ * Presence of the credentials file is the only signal available on disk. macOS
+ * keeps credentials in Keychain instead, so it reports unknown rather than a
+ * confident wrong answer. win32 stays unknown too: manual smoke (plan phase 3)
+ * did not exercise a real `/login`, so whether `.credentials.json` lands in the
+ * profile dir there is still unproven — guessing would repeat the exact mistake
+ * that got macOS excluded.
  */
-export function detectAuthStatus(adapter: HarnessAdapter, dir: string): AuthStatus {
-  if (process.platform !== "linux") {
+export function detectAuthStatus(
+  adapter: HarnessAdapter,
+  dir: string,
+  platform: NodeJS.Platform,
+): AuthStatus {
+  if (platform !== "linux") {
     return "unknown";
   }
   return fs.existsSync(path.join(dir, adapter.credentialsFile))
@@ -174,7 +181,7 @@ export function listProfiles(adapter: HarnessAdapter): ProfileSummary[] {
         name: entry.name,
         dir,
         meta: readProfileMeta(dir),
-        authStatus: detectAuthStatus(adapter, dir),
+        authStatus: detectAuthStatus(adapter, dir, process.platform),
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));

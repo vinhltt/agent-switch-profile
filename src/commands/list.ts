@@ -5,9 +5,9 @@ import pc from "picocolors";
 import type { HarnessAdapter } from "../harness/types";
 import { checkStoreRootPermissions } from "../paths";
 import { type AuthStatus, listProfiles } from "../profile-store";
-import { type RcBlock, findOrphanEntries, readBlock } from "../shell/rc-block";
+import { type RcBlock, findOrphanEntries, hostPathsFor, readBlock } from "../shell/rc-block";
 
-import { type GlobalOptions, resolveHarness, resolveRcPath } from "./shared";
+import { type GlobalOptions, binaryOnPath, resolveHarness, resolveRcPath } from "./shared";
 
 /** Bump only for a breaking change; consumers pin against it. */
 export const LIST_SCHEMA_VERSION = 1;
@@ -17,7 +17,8 @@ export type WarningCode =
   | "ORPHAN_ALIAS"
   | "MISSING_ALIAS"
   | "INVALID_PROFILE"
-  | "LOOSE_PERMISSIONS";
+  | "LOOSE_PERMISSIONS"
+  | "BINARY_NOT_FOUND";
 
 export interface ListWarning {
   code: WarningCode;
@@ -48,6 +49,8 @@ export interface ListingSources {
   storePermissions: ReturnType<typeof checkStoreRootPermissions>;
   /** `process.env[adapter.configEnvVar]`, read by the caller. */
   globalConfigDir: string | undefined;
+  /** Whether `adapter.binary` was found on PATH. */
+  binaryFound: boolean;
 }
 
 export function buildListing(sources: ListingSources): Listing {
@@ -70,6 +73,14 @@ export function buildListing(sources: ListingSources): Listing {
       message:
         `the profile store is mode ${sources.storePermissions.mode.toString(8)}; it holds ` +
         `credentials and should be 700. Run: chmod 700 on it.`,
+      profile: null,
+    });
+  }
+
+  if (!sources.binaryFound) {
+    warnings.push({
+      code: "BINARY_NOT_FOUND",
+      message: `${adapter.binary} was not found on PATH — the aliases below will fail to run it.`,
       profile: null,
     });
   }
@@ -183,14 +194,16 @@ export function register(program: Command): void {
     .action((options: ListOptions & { rc?: string }, command: Command) => {
       const adapter = resolveHarness(command.optsWithGlobals<GlobalOptions>());
       const homeDir = os.homedir();
+      const host = hostPathsFor(homeDir, process.platform);
       const rc = resolveRcPath(options.rc, undefined, homeDir, process.env.SHELL);
 
       const listing = buildListing({
         adapter,
-        block: readBlock(rc.rcPath, homeDir),
+        block: readBlock(rc.rcPath, host),
         profiles: listProfiles(adapter),
-        storePermissions: checkStoreRootPermissions(),
+        storePermissions: checkStoreRootPermissions(process.platform),
         globalConfigDir: process.env[adapter.configEnvVar],
+        binaryFound: binaryOnPath(adapter.binary, process.platform, process.env),
       });
 
       if (options.json) {

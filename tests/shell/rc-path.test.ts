@@ -3,7 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { RC_BASENAME_ALLOWLIST, validateRcPath } from "../../src/shell/rc-path";
+import {
+  RC_BASENAME_ALLOWLIST,
+  assertGitBashOnWindows,
+  detectRcFile,
+  validateRcPath,
+} from "../../src/shell/rc-path";
 import { ValidationError } from "../../src/validate";
 
 import { createTempHome, type TempHome } from "../helpers/temp-home";
@@ -91,5 +96,76 @@ describe("validateRcPath", () => {
   test("refuses empty and non-string input", () => {
     expect(() => validateRcPath("", tmp.home)).toThrow(ValidationError);
     expect(() => validateRcPath(null, tmp.home)).toThrow(ValidationError);
+  });
+});
+
+describe("assertGitBashOnWindows", () => {
+  test("passes through on non-win32 regardless of MSYSTEM", () => {
+    expect(() => assertGitBashOnWindows("linux", {})).not.toThrow();
+    expect(() => assertGitBashOnWindows("darwin", {})).not.toThrow();
+  });
+
+  test("passes through on win32 when MSYSTEM is set (Git Bash)", () => {
+    expect(() => assertGitBashOnWindows("win32", { MSYSTEM: "MINGW64" })).not.toThrow();
+  });
+
+  test("refuses win32 without MSYSTEM (PowerShell or CMD)", () => {
+    expect(() => assertGitBashOnWindows("win32", {})).toThrow(/Git Bash/);
+  });
+
+  // The bug this guards against: a configured defaultRcFile or a recorded
+  // profile rcFile lets resolveRcPath skip detectRcFile (and its own $SHELL
+  // check) entirely — this guard must not depend on that path being taken.
+  test("refuses win32 even with $SHELL set (inherited from a parent Git Bash process)", () => {
+    expect(() =>
+      assertGitBashOnWindows("win32", { SHELL: "/usr/bin/bash" }),
+    ).toThrow(/Git Bash/);
+  });
+});
+
+describe("detectRcFile", () => {
+  test("maps a posix bash shell to .bashrc", () => {
+    expect(detectRcFile("/usr/bin/bash", tmp.home, "linux")).toBe(path.join(tmp.home, ".bashrc"));
+  });
+
+  test("maps a posix zsh shell to .zshrc", () => {
+    expect(detectRcFile("/usr/bin/zsh", tmp.home, "linux")).toBe(path.join(tmp.home, ".zshrc"));
+  });
+
+  test("maps a Git Bash Windows-native bash.exe path to .bashrc", () => {
+    // MSYS/Git Bash rewrites $SHELL to a full Windows path when spawning a
+    // Win32-native process (e.g. node.exe), so the value never looks like
+    // "/usr/bin/bash" on Windows.
+    expect(detectRcFile("C:\\Program Files\\Git\\usr\\bin\\bash.exe", tmp.home, "win32")).toBe(
+      path.join(tmp.home, ".bashrc"),
+    );
+  });
+
+  test("maps a Windows-native zsh.exe path to .zshrc", () => {
+    expect(detectRcFile("C:\\tools\\zsh.exe", tmp.home, "win32")).toBe(
+      path.join(tmp.home, ".zshrc"),
+    );
+  });
+
+  // path.win32.parse().name would strip ".real" as if it were an extension,
+  // silently accepting a shell the old path.basename-based check rejected —
+  // Goal 4 requires zero behavior change on posix.
+  test("still refuses a posix shell whose name merely contains a dot", () => {
+    expect(() => detectRcFile("/usr/bin/bash.real", tmp.home, "linux")).toThrow(
+      /unsupported shell/,
+    );
+  });
+
+  test("refuses an unset shell", () => {
+    expect(() => detectRcFile(undefined, tmp.home, "linux")).toThrow(ValidationError);
+  });
+
+  test("refuses an unset shell on win32 with a message pointing at Git Bash and WSL", () => {
+    expect(() => detectRcFile(undefined, tmp.home, "win32")).toThrow(/Git Bash/);
+    expect(() => detectRcFile(undefined, tmp.home, "win32")).toThrow(/WSL/);
+  });
+
+  test("refuses an unsupported shell", () => {
+    expect(() => detectRcFile("/usr/bin/fish", tmp.home, "linux")).toThrow(/unsupported shell/);
   });
 });

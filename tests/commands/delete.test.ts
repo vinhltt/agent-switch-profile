@@ -31,7 +31,7 @@ afterEach(() => {
 
 function makeProfile(name: string, alias: string): string {
   const created = createProfile(claudeAdapter, name, alias, tmp.rcFile);
-  upsertAlias(tmp.rcFile, tmp.home, {
+  upsertAlias(tmp.rcFile, tmp.host, {
     alias,
     profileDir: profileDir("claude", name),
     envVar: claudeAdapter.configEnvVar,
@@ -108,7 +108,7 @@ describe("recreationNotice", () => {
 describe("observeDelete", () => {
   test("finds the alias that points at the directory", () => {
     const dir = makeProfile("work", "ccwork");
-    const state = observeDelete(claudeAdapter, dir, tmp.rcFile, tmp.home);
+    const state = observeDelete(claudeAdapter, dir, tmp.rcFile, tmp.host);
 
     expect(state).toMatchObject({ dirExists: true, alias: "ccwork" });
     expect(state.liveProcesses).toEqual([]);
@@ -124,12 +124,12 @@ describe("executeDelete", () => {
       "work",
       { kind: "delete", alias: "ccwork" },
       tmp.rcFile,
-      tmp.home,
+      tmp.host,
     );
 
     expect(outcome.removed?.existed).toBe(true);
     expect(fs.existsSync(dir)).toBe(false);
-    expect(hasAlias(readBlock(tmp.rcFile, tmp.home), "ccwork")).toBe(false);
+    expect(hasAlias(readBlock(tmp.rcFile, tmp.host), "ccwork")).toBe(false);
   });
 
   // Removing the credentials is the point; the alias is only a shortcut. An
@@ -149,13 +149,13 @@ describe("executeDelete", () => {
         "work",
         { kind: "delete", alias: "ccwork" },
         tmp.rcFile,
-        tmp.home,
+        tmp.host,
         effects,
       ),
     ).toThrow(/EACCES/);
 
     expect(fs.existsSync(dir)).toBe(true);
-    expect(hasAlias(readBlock(tmp.rcFile, tmp.home), "ccwork")).toBe(true);
+    expect(hasAlias(readBlock(tmp.rcFile, tmp.host), "ccwork")).toBe(true);
   });
 
   test("clears an orphan alias without touching the store", () => {
@@ -167,12 +167,12 @@ describe("executeDelete", () => {
       "work",
       { kind: "clear-orphan-alias", alias: "ccwork" },
       tmp.rcFile,
-      tmp.home,
+      tmp.host,
     );
 
     expect(outcome.removed).toBeNull();
     expect(outcome.aliasRemoved).toBe("ccwork");
-    expect(hasAlias(readBlock(tmp.rcFile, tmp.home), "ccwork")).toBe(false);
+    expect(hasAlias(readBlock(tmp.rcFile, tmp.host), "ccwork")).toBe(false);
   });
 
   test("restores the rc file to exactly what it was before the profile existed", () => {
@@ -184,7 +184,7 @@ describe("executeDelete", () => {
       "work",
       { kind: "delete", alias: "ccwork" },
       tmp.rcFile,
-      tmp.home,
+      tmp.host,
     );
 
     expect(fs.readFileSync(tmp.rcFile, "utf8")).toBe(before);
@@ -199,10 +199,10 @@ describe("executeDelete", () => {
       "work",
       { kind: "delete", alias: "ccwork" },
       tmp.rcFile,
-      tmp.home,
+      tmp.host,
     );
 
     expect(fs.existsSync(path.join(keep, "profile.json"))).toBe(true);
-    expect(hasAlias(readBlock(tmp.rcFile, tmp.home), "ccpersonal")).toBe(true);
+    expect(hasAlias(readBlock(tmp.rcFile, tmp.host), "ccpersonal")).toBe(true);
   });
 });

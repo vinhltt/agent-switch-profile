@@ -8,7 +8,9 @@ import type { HarnessAdapter } from "../harness/types";
 import { profileDir } from "../paths";
 import { type DeleteProfileResult, deleteProfile as deleteProfileOnDisk, readProfileMeta } from "../profile-store";
 import {
+  type HostPaths,
   type RcWriteResult,
+  hostPathsFor,
   readBlock,
   removeAlias as removeAliasFromRc,
 } from "../shell/rc-block";
@@ -19,6 +21,7 @@ import {
   EXIT_OK,
   EXIT_USAGE,
   type GlobalOptions,
+  countRunningHarnessProcesses,
   findProcessesUsingProfile,
   installCursorGuard,
   isInteractive,
@@ -76,10 +79,10 @@ export function observeDelete(
   adapter: HarnessAdapter,
   dir: string,
   rcPath: string,
-  homeDir: string,
+  host: HostPaths,
 ): DeleteObservation {
   const meta = readProfileMeta(dir);
-  const entry = readBlock(rcPath, homeDir).entries.find((candidate) => candidate.profileDir === dir);
+  const entry = readBlock(rcPath, host).entries.find((candidate) => candidate.profileDir === dir);
 
   return {
     dirExists: fs.existsSync(dir),
@@ -115,7 +118,7 @@ export function executeDelete(
   name: string,
   action: DeleteAction,
   rcPath: string,
-  homeDir: string,
+  host: HostPaths,
   effects: DeleteEffects = defaultDeleteEffects,
 ): DeleteOutcome {
   const dir = profileDir(adapter.name, name);
@@ -129,7 +132,7 @@ export function executeDelete(
       dir,
       removed: null,
       aliasRemoved: action.alias,
-      rcWrite: effects.removeAlias(rcPath, homeDir, action.alias),
+      rcWrite: effects.removeAlias(rcPath, host, action.alias),
     };
   }
 
@@ -141,7 +144,7 @@ export function executeDelete(
     dir,
     removed,
     aliasRemoved: action.alias,
-    rcWrite: effects.removeAlias(rcPath, homeDir, action.alias),
+    rcWrite: effects.removeAlias(rcPath, host, action.alias),
   };
 }
 
@@ -187,6 +190,7 @@ export function register(program: Command): void {
       const adapter = resolveHarness(command.optsWithGlobals<GlobalOptions>());
       const validName = validateProfileName(name);
       const homeDir = os.homedir();
+      const host = hostPathsFor(homeDir, process.platform);
       const dir = profileDir(adapter.name, validName);
 
       const meta = readProfileMeta(dir);
@@ -194,7 +198,7 @@ export function register(program: Command): void {
       const rc = resolveRcPath(options.rc, recorded?.rcFile, homeDir, process.env.SHELL);
 
       const interactive = isInteractive();
-      const state = observeDelete(adapter, dir, rc.rcPath, homeDir);
+      const state = observeDelete(adapter, dir, rc.rcPath, host);
       const action = planDelete({
         name: validName,
         force: Boolean(options.force),
@@ -213,10 +217,20 @@ export function register(program: Command): void {
           `${pc.yellow("!")} ${validName} is still in use by pid ${state.liveProcesses.join(", ")} — ` +
             `deleting anyway because --force was given\n`,
         );
-      } else if (process.platform !== "linux") {
-        process.stderr.write(
-          `${pc.dim("note: asp cannot check for running sessions on this platform")}\n`,
-        );
+      } else {
+        const runningCount = countRunningHarnessProcesses(adapter.binary, process.platform);
+        if (runningCount === null) {
+          if (process.platform !== "linux") {
+            process.stderr.write(
+              `${pc.dim("note: asp cannot check for running sessions on this platform")}\n`,
+            );
+          }
+        } else if (runningCount > 0) {
+          process.stderr.write(
+            `${pc.yellow("!")} ${runningCount} ${adapter.binary} process(es) are running — asp cannot ` +
+              `tell which profile they belong to on this platform. Deleting anyway.\n`,
+          );
+        }
       }
 
       if (action.kind === "delete" && !options.force) {
@@ -228,7 +242,7 @@ export function register(program: Command): void {
         }
       }
 
-      const outcome = executeDelete(adapter, validName, action, rc.rcPath, homeDir);
+      const outcome = executeDelete(adapter, validName, action, rc.rcPath, host);
 
       for (const warning of outcome.rcWrite?.warnings ?? []) {
         process.stderr.write(`${pc.yellow("!")} ${warning}\n`);

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -63,7 +64,10 @@ export function resolveRcPath(
   const configured = readStoreConfig().defaultRcFile;
   if (configured) return { source: "config", rcPath: validateRcPath(configured, homeDir) };
 
-  return { source: "shell", rcPath: validateRcPath(detectRcFile(shell, homeDir), homeDir) };
+  return {
+    source: "shell",
+    rcPath: validateRcPath(detectRcFile(shell, homeDir, process.platform), homeDir),
+  };
 }
 
 /**
@@ -112,6 +116,88 @@ export function findProcessesUsingProfile(configEnvVar: string, profileDir: stri
     }
   }
   return found;
+}
+
+/**
+ * `spawnSync` does not throw on its own — a missing `tasklist` (e.g. not on
+ * Git Bash's PATH) surfaces as `result.error`/a null status, not an
+ * exception — so this throws explicitly, letting the try/catch in
+ * `countRunningHarnessProcesses` fall back to null instead of misreading a
+ * failed run as "0 processes found".
+ */
+function defaultRun(cmd: string, args: string[]): string {
+  const result = spawnSync(cmd, args, { encoding: "utf8" });
+  if (result.error || result.status !== 0) {
+    throw result.error ?? new Error(`${cmd} exited with status ${result.status}`);
+  }
+  return result.stdout ?? "";
+}
+
+/**
+ * Processes matching `binary` currently running, or null when this platform
+ * has no way to check. `/proc` covers linux via `findProcessesUsingProfile`;
+ * this covers win32 with a coarser count, since Windows exposes no
+ * unprivileged way to read another process's environment (reading it needs
+ * `ReadProcessMemory` into the PEB, which needs a native addon or debug
+ * rights) — so asp can warn that *something* is running, not which profile.
+ */
+export function countRunningHarnessProcesses(
+  binary: string,
+  platform: NodeJS.Platform,
+  run: (cmd: string, args: string[]) => string = defaultRun,
+): number | null {
+  if (platform !== "win32") return null;
+
+  let output: string;
+  try {
+    output = run("tasklist", ["/FI", `IMAGENAME eq ${binary}.exe`, "/NH"]);
+  } catch {
+    return null;
+  }
+
+  const imageName = `${binary.toLowerCase()}.exe`;
+  return output
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0 && line.toLowerCase().startsWith(imageName)).length;
+}
+
+/**
+ * Whether `binary` is reachable on PATH. Pure and platform-injected: no
+ * subprocess, so it is cheap enough to call before every `create`/`list`.
+ *
+ * win32 matches case-insensitively — NTFS is, and `PATHEXT` is conventionally
+ * uppercase (`.EXE`) while installed binaries are usually lowercase
+ * (`claude.exe`) — by reading each directory's entries once instead of
+ * probing `fs.existsSync` per candidate, so this is exercised the same way
+ * on any host filesystem, case-sensitive or not.
+ */
+export function binaryOnPath(
+  binary: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  // From `platform`, not the real `path.delimiter` — otherwise the win32
+  // branch below is untestable from a posix host, where the real delimiter
+  // (":") would shred a Windows-style "C:\Windows;C:\nodejs" PATH value.
+  const delimiter = platform === "win32" ? ";" : ":";
+  const dirs = (env.PATH ?? "").split(delimiter).filter((dir) => dir.length > 0);
+
+  if (platform !== "win32") {
+    return dirs.some((dir) => fs.existsSync(path.join(dir, binary)));
+  }
+
+  const extensions = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";");
+  const candidates = new Set(extensions.map((ext) => `${binary}${ext}`.toLowerCase()));
+
+  return dirs.some((dir) => {
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      return false;
+    }
+    return names.some((name) => candidates.has(name.toLowerCase()));
+  });
 }
 
 /** True only when both streams are a terminal: prompts read stdin but draw on stdout. */

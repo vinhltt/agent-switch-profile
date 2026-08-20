@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-20
+
+### Added
+- Windows support via Git Bash: `asp create`, `list`, and `delete` now work on
+  native Windows. Aliases embed the absolute Windows path so `claude.exe` reads
+  the right profile directory when the alias runs.
+- Running `asp` from PowerShell or CMD is refused up front with a message
+  pointing to Git Bash or WSL, instead of writing an alias those shells cannot
+  use.
+- `create` and `list` warn when the harness binary is not on PATH, so a dead
+  alias is flagged at creation time rather than discovered on first run.
+  `list --json` reports this as a new `BINARY_NOT_FOUND` warning code.
+- `delete` on Windows warns how many harness processes are currently running
+  before removing a profile — per-profile detection is not possible there, so
+  the count is a coarse heads-up rather than a block.
+
+### Fixed
+- Shell detection no longer rejects Git Bash when `$SHELL` arrives as a Windows
+  path like `C:\Program Files\Git\usr\bin\bash.exe` — previously `create`
+  failed with `unsupported shell` on a perfectly valid Git Bash session.
+- rc-file backups no longer fail on Windows: backup filenames now use `-`
+  instead of `:` in their timestamps (`:` is invalid on NTFS), and pruning
+  still orders old colon-named backups correctly alongside new ones.
+- `list` on Windows no longer emits a false `LOOSE_PERMISSIONS` warning on
+  every run — the permission bits it checked are fabricated by Node on Windows.
+- Paths differing only by drive-letter or directory case are treated as equal
+  on Windows, so a home directory reported as `C:\Users\name` in one place and
+  `C:\Users\Name` in another no longer fails validation.
+- Hand-written Git-Bash-style paths (`/c/...`) inside the managed rc block are
+  preserved untouched on Windows instead of being silently rewritten to a
+  wrong location on the next write.
+
 ## [0.1.0] - 2026-08-19
 
 ### Added

@@ -157,7 +157,7 @@ describe("observeCreate", () => {
       "ccwork",
       profileDir("claude", "work"),
       tmp.rcFile,
-      tmp.home,
+      tmp.host,
     );
 
     expect(state).toMatchObject({ dirExists: false, collisionOutsideBlock: null });
@@ -173,7 +173,7 @@ describe("observeCreate", () => {
       "ccwork",
       profileDir("claude", "work"),
       tmp.rcFile,
-      tmp.home,
+      tmp.host,
     );
     expect(state.collisionOutsideBlock).toContain("echo hi");
   });
@@ -186,7 +186,7 @@ describe("executeCreate", () => {
     alias: "ccwork",
     dir: profileDir("claude", "work"),
     rcPath: tmp.rcFile,
-    homeDir: tmp.home,
+    host: tmp.host,
   });
 
   test("creates the directory, metadata and alias together", () => {
@@ -194,7 +194,7 @@ describe("executeCreate", () => {
 
     expect(outcome.resumed).toBe(false);
     expect(fs.existsSync(path.join(outcome.dir, PROFILE_META_FILENAME))).toBe(true);
-    expect(hasAlias(readBlock(tmp.rcFile, tmp.home), "ccwork")).toBe(true);
+    expect(hasAlias(readBlock(tmp.rcFile, tmp.host), "ccwork")).toBe(true);
     expect(outcome.rcWrite.backupPath).not.toBeNull();
   });
 
@@ -203,7 +203,7 @@ describe("executeCreate", () => {
     const outcome = executeCreate(input());
 
     expect(outcome.resumed).toBe(true);
-    expect(hasAlias(readBlock(tmp.rcFile, tmp.home), "ccwork")).toBe(true);
+    expect(hasAlias(readBlock(tmp.rcFile, tmp.host), "ccwork")).toBe(true);
   });
 
   // The rc file is renamed into place before this failure, so rolling back has
@@ -257,8 +257,8 @@ describe("executeCreate", () => {
   test("reports a rollback that fails instead of hiding it", () => {
     const effects: CreateEffects = {
       ...defaultCreateEffects,
-      upsertAlias: (rcPath, homeDir, entry) => {
-        const result = upsertAlias(rcPath, homeDir, entry);
+      upsertAlias: (rcPath, host, entry) => {
+        const result = upsertAlias(rcPath, host, entry);
         // Make the rc file unrestorable by turning its directory read-only.
         fs.chmodSync(tmp.home, 0o500);
         return result;

@@ -27,7 +27,7 @@ afterEach(() => {
 
 function makeProfile(name: string, alias: string): string {
   const created = createProfile(claudeAdapter, name, alias, tmp.rcFile);
-  upsertAlias(tmp.rcFile, tmp.home, {
+  upsertAlias(tmp.rcFile, tmp.host, {
     alias,
     profileDir: profileDir("claude", name),
     envVar: claudeAdapter.configEnvVar,
@@ -36,13 +36,14 @@ function makeProfile(name: string, alias: string): string {
   return created.dir;
 }
 
-function listing(globalConfigDir?: string): Listing {
+function listing(globalConfigDir?: string, binaryFound = true): Listing {
   return buildListing({
     adapter: claudeAdapter,
-    block: readBlock(tmp.rcFile, tmp.home),
+    block: readBlock(tmp.rcFile, tmp.host),
     profiles: listProfiles(claudeAdapter),
-    storePermissions: checkStoreRootPermissions(),
+    storePermissions: checkStoreRootPermissions("linux"),
     globalConfigDir,
+    binaryFound,
   });
 }
 
@@ -130,6 +131,11 @@ describe("warnings", () => {
 
     fs.chmodSync(tmp.store, 0o755);
     expect(codes(listing())).toContain("LOOSE_PERMISSIONS");
+  });
+
+  test("BINARY_NOT_FOUND when the harness binary is not on PATH", () => {
+    expect(codes(listing(undefined, true))).not.toContain("BINARY_NOT_FOUND");
+    expect(codes(listing(undefined, false))).toContain("BINARY_NOT_FOUND");
   });
 
   // Hostile metadata must not decide what the user is told to run.

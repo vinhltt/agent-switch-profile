@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { upsertAlias } from "../../src/shell/rc-block";
+import { hostPathsFor, upsertAlias } from "../../src/shell/rc-block";
 
 /**
  * The unit tests prove what asp writes. These prove a real shell agrees: it
@@ -43,7 +43,7 @@ function runThroughShell(shell: string, homeName: string): { output: string; exp
   const rcPath = path.join(home, rcName);
   fs.writeFileSync(rcPath, "# prologue\n");
 
-  upsertAlias(rcPath, home, {
+  upsertAlias(rcPath, hostPathsFor(home, "linux"), {
     alias: "ccwork",
     profileDir,
     envVar: "CLAUDE_CONFIG_DIR",

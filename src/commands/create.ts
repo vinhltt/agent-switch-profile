@@ -15,10 +15,12 @@ import {
 } from "../profile-store";
 import {
   type AliasEntry,
+  type HostPaths,
   type RcWriteResult,
   captureRcPreImage,
   findCollision,
   hasAlias,
+  hostPathsFor,
   readBlock,
   restoreRcPreImage,
   upsertAlias as upsertAliasInRc,
@@ -28,6 +30,7 @@ import { ValidationError, validateAliasName, validateProfileName } from "../vali
 import {
   EXIT_OK,
   type GlobalOptions,
+  binaryOnPath,
   installCursorGuard,
   isInteractive,
   resolveHarness,
@@ -116,9 +119,9 @@ export function observeCreate(
   alias: string,
   dir: string,
   rcPath: string,
-  homeDir: string,
+  host: HostPaths,
 ): CreateObservation {
-  const block = readBlock(rcPath, homeDir);
+  const block = readBlock(rcPath, host);
   let content = "";
   try {
     content = fs.readFileSync(rcPath, "utf8");
@@ -142,14 +145,14 @@ export interface CreateEffects {
   createProfile: typeof createProfileOnDisk;
   upsertAlias: typeof upsertAliasInRc;
   /** Post-write proof that the alias really landed in the rc file. */
-  verifyAlias: (rcPath: string, homeDir: string, alias: string) => void;
+  verifyAlias: (rcPath: string, host: HostPaths, alias: string) => void;
 }
 
 export const defaultCreateEffects: CreateEffects = {
   createProfile: createProfileOnDisk,
   upsertAlias: upsertAliasInRc,
-  verifyAlias: (rcPath, homeDir, alias) => {
-    if (!hasAlias(readBlock(rcPath, homeDir), alias)) {
+  verifyAlias: (rcPath, host, alias) => {
+    if (!hasAlias(readBlock(rcPath, host), alias)) {
       throw new Error(`alias ${alias} is missing from ${rcPath} after writing it`);
     }
   },
@@ -161,7 +164,7 @@ export interface ExecuteCreateInput {
   alias: string;
   dir: string;
   rcPath: string;
-  homeDir: string;
+  host: HostPaths;
 }
 
 export interface CreateOutcome {
@@ -198,8 +201,8 @@ export function executeCreate(
     };
 
     rcTouched = true;
-    const rcWrite = effects.upsertAlias(input.rcPath, input.homeDir, entry);
-    effects.verifyAlias(input.rcPath, input.homeDir, input.alias);
+    const rcWrite = effects.upsertAlias(input.rcPath, input.host, entry);
+    effects.verifyAlias(input.rcPath, input.host, input.alias);
 
     return {
       dir: input.dir,
@@ -288,6 +291,7 @@ export function register(program: Command): void {
       const adapter = resolveHarness(command.optsWithGlobals<GlobalOptions>());
       const validName = validateProfileName(name);
       const homeDir = os.homedir();
+      const host = hostPathsFor(homeDir, process.platform);
       const dir = profileDir(adapter.name, validName);
 
       const existing = readProfileMeta(dir);
@@ -302,7 +306,7 @@ export function register(program: Command): void {
       }
 
       const provisionalAlias = requestedAlias ?? recorded?.alias ?? defaultAlias;
-      const state = observeCreate(adapter, validName, provisionalAlias, dir, rc.rcPath, homeDir);
+      const state = observeCreate(adapter, validName, provisionalAlias, dir, rc.rcPath, host);
       const action = planCreate({
         name: validName,
         requestedAlias,
@@ -324,11 +328,17 @@ export function register(program: Command): void {
         alias: action.alias,
         dir,
         rcPath: rc.rcPath,
-        homeDir,
+        host,
       });
 
       for (const warning of outcome.rcWrite.warnings) {
         process.stderr.write(`${pc.yellow("!")} ${warning}\n`);
+      }
+
+      if (!binaryOnPath(adapter.binary, process.platform, process.env)) {
+        process.stderr.write(
+          `${pc.yellow("!")} ${adapter.binary} was not found on PATH — the alias below will fail until it is installed and on PATH\n`,
+        );
       }
 
       const heading =

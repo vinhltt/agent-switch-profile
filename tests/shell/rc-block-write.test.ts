@@ -7,10 +7,12 @@ import { backupsDirFor } from "../../src/paths";
 import {
   type AliasEntry,
   BLOCK_VERSION,
+  type HostPaths,
   blockEndMarker,
   blockStartMarker,
   findCollision,
   findOrphanEntries,
+  hostPathsFor,
   readBlock,
   removeAlias,
   rewriteBlock,
@@ -19,12 +21,14 @@ import {
 import { ValidationError } from "../../src/validate";
 
 let home: string;
+let host: HostPaths;
 let rcPath: string;
 
 const RC_PROLOGUE = "# my shell config\nexport PATH=\"$PATH:/opt/bin\"\n";
 
 beforeEach(() => {
   home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asp-rcw-")));
+  host = hostPathsFor(home, "linux");
   rcPath = path.join(home, ".bashrc");
   fs.writeFileSync(rcPath, RC_PROLOGUE);
 });
@@ -58,7 +62,7 @@ describe("file safety", () => {
     const link = path.join(home, ".zshrc");
     fs.symlinkSync(real, link);
 
-    const result = upsertAlias(link, home, entry("ccwork", "work"));
+    const result = upsertAlias(link, host, entry("ccwork", "work"));
 
     expect(result.realPath).toBe(real);
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
@@ -67,18 +71,18 @@ describe("file safety", () => {
 
   test("preserves the file mode", () => {
     fs.chmodSync(rcPath, 0o600);
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
     expect(fs.statSync(rcPath).mode & 0o777).toBe(0o600);
 
     fs.chmodSync(rcPath, 0o644);
-    upsertAlias(rcPath, home, entry("ccother", "other"));
+    upsertAlias(rcPath, host, entry("ccother", "other"));
     expect(fs.statSync(rcPath).mode & 0o777).toBe(0o644);
   });
 
   test("preserves CRLF line endings without duplicating the block", () => {
     fs.writeFileSync(rcPath, "# windows edited\r\nexport A=1\r\n");
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
-    upsertAlias(rcPath, home, entry("ccother", "other"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("ccother", "other"));
 
     const content = fs.readFileSync(rcPath, "utf8");
     expect(content).toContain(`${blockStartMarker(BLOCK_VERSION)}\r\n`);
@@ -88,27 +92,27 @@ describe("file safety", () => {
 
   test("refuses an rc file with more than one hard link", () => {
     fs.linkSync(rcPath, path.join(home, "hardlink-copy"));
-    expect(() => upsertAlias(rcPath, home, entry("ccwork", "work"))).toThrow(/hard link/);
+    expect(() => upsertAlias(rcPath, host, entry("ccwork", "work"))).toThrow(/hard link/);
     expect(fs.readFileSync(rcPath, "utf8")).toBe(RC_PROLOGUE);
   });
 
   // The alias must carry `$HOME`, not the expanded path, so a moved or renamed
   // home does not silently point every profile at a directory that is gone.
   test("stores the path as $HOME on disk while reporting it absolute", () => {
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
 
     const content = fs.readFileSync(rcPath, "utf8");
     expect(content).toContain('CLAUDE_CONFIG_DIR="$HOME/.agent-switch-profiles/claude/work"');
     expect(content).not.toContain(home + "/.agent-switch-profiles/claude/work");
 
-    expect(readBlock(rcPath, home).entries[0]?.profileDir).toBe(
+    expect(readBlock(rcPath, host).entries[0]?.profileDir).toBe(
       path.join(home, ".agent-switch-profiles", "claude", "work"),
     );
   });
 
   test("aborts when the rc file changes between the read and the write", () => {
     expect(() =>
-      rewriteBlock(rcPath, home, (block) => {
+      rewriteBlock(rcPath, host, (block) => {
         // Another editor saving the file while asp holds the lock.
         fs.writeFileSync(rcPath, `${RC_PROLOGUE}# added by someone else\n`);
         return { ...block, present: true, entries: [entry("ccwork", "work")] };
@@ -121,14 +125,14 @@ describe("file safety", () => {
   });
 
   test("leaves no temp file behind", () => {
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
     expect(fs.readdirSync(home).filter((name) => name.includes("asp-"))).toEqual([]);
   });
 });
 
 describe("backups", () => {
   test("writes a timestamped backup into the store, not next to the rc file", () => {
-    const result = upsertAlias(rcPath, home, entry("ccwork", "work"));
+    const result = upsertAlias(rcPath, host, entry("ccwork", "work"));
 
     expect(result.backupPath).not.toBeNull();
     expect(result.backupPath?.startsWith(backupsDirFor(home))).toBe(true);
@@ -140,8 +144,8 @@ describe("backups", () => {
   });
 
   test("never overwrites an earlier backup", () => {
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
-    upsertAlias(rcPath, home, entry("ccother", "other"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("ccother", "other"));
 
     expect(backupNames()).toHaveLength(2);
     expect(new Set(backupNames()).size).toBe(2);
@@ -149,17 +153,46 @@ describe("backups", () => {
 
   test("keeps only the five most recent", () => {
     for (let index = 0; index < 8; index += 1) {
-      upsertAlias(rcPath, home, entry(`ccprofile${index}`, `profile${index}`));
+      upsertAlias(rcPath, host, entry(`ccprofile${index}`, `profile${index}`));
     }
     expect(backupNames()).toHaveLength(5);
   });
 
+  // A backup written before ":" was swapped for "-" (still valid on posix,
+  // where colons never broke the write) sorts *after* every dash-named one
+  // in a raw string sort, even when it is chronologically oldest — pruning
+  // by that raw sort would delete the wrong end of the list.
+  test("prunes oldest-first even when legacy colon-named backups are mixed in", () => {
+    const dir = backupsDirFor(home);
+    fs.mkdirSync(dir, { recursive: true });
+    const legacy = path.join(dir, ".bashrc.2020-01-01T00:00:00.000Z");
+    fs.writeFileSync(legacy, "oldest, legacy colon format");
+
+    for (let index = 0; index < 5; index += 1) {
+      upsertAlias(rcPath, host, entry(`ccprofile${index}`, `profile${index}`));
+    }
+
+    expect(backupNames()).toHaveLength(5);
+    expect(fs.existsSync(legacy)).toBe(false);
+  });
+
   test("refuses to back up an empty rc file over a non-empty history", () => {
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
     fs.writeFileSync(rcPath, "");
 
-    expect(() => upsertAlias(rcPath, home, entry("ccother", "other"))).toThrow(/earlier damage/);
+    expect(() => upsertAlias(rcPath, host, entry("ccother", "other"))).toThrow(/earlier damage/);
     expect(backupNames()).toHaveLength(1);
+  });
+
+  // ":" is reserved for NTFS alternate data streams, so a raw ISO 8601
+  // timestamp (which contains ":") makes the backup file unwritable on
+  // Windows. Every platform must produce a colon-free name.
+  test("does not throw on a colon-free timestamped filename", () => {
+    expect(() => upsertAlias(rcPath, host, entry("ccwork", "work"))).not.toThrow();
+
+    const names = backupNames();
+    expect(names).toHaveLength(1);
+    expect(names[0]).not.toContain(":");
   });
 });
 
@@ -168,25 +201,25 @@ describe("damaged or unknown markers", () => {
     const damaged = `${RC_PROLOGUE}${blockStartMarker(BLOCK_VERSION)}\nalias ccwork='x'\n`;
     fs.writeFileSync(rcPath, damaged);
 
-    expect(() => upsertAlias(rcPath, home, entry("ccother", "other"))).toThrow(ValidationError);
+    expect(() => upsertAlias(rcPath, host, entry("ccother", "other"))).toThrow(ValidationError);
     expect(fs.readFileSync(rcPath, "utf8")).toBe(damaged);
     expect(backupNames()).toEqual([]);
   });
 
   test("refuses duplicated blocks", () => {
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
     fs.appendFileSync(
       rcPath,
       `${blockStartMarker(BLOCK_VERSION)}\n${blockEndMarker(BLOCK_VERSION)}\n`,
     );
-    expect(() => readBlock(rcPath, home)).toThrow(/damaged/);
+    expect(() => readBlock(rcPath, host)).toThrow(/damaged/);
   });
 
   test("refuses a block written by a newer asp instead of rewriting it", () => {
     const future = `${RC_PROLOGUE}# >>> asp managed block v99 >>>\nalias ccx='y'\n# <<< asp managed block v99 <<<\n`;
     fs.writeFileSync(rcPath, future);
 
-    expect(() => upsertAlias(rcPath, home, entry("ccwork", "work"))).toThrow(/Upgrade asp/);
+    expect(() => upsertAlias(rcPath, host, entry("ccwork", "work"))).toThrow(/Upgrade asp/);
     expect(fs.readFileSync(rcPath, "utf8")).toBe(future);
   });
 
@@ -195,16 +228,16 @@ describe("damaged or unknown markers", () => {
       rcPath,
       `${blockEndMarker(BLOCK_VERSION)}\n${blockStartMarker(BLOCK_VERSION)}\n`,
     );
-    expect(() => readBlock(rcPath, home)).toThrow(/closes before it opens/);
+    expect(() => readBlock(rcPath, host)).toThrow(/closes before it opens/);
   });
 });
 
 describe("locking", () => {
   test("a nested write aborts instead of racing the outer one", () => {
     expect(() =>
-      rewriteBlock(rcPath, home, (block) => {
+      rewriteBlock(rcPath, host, (block) => {
         // Simulates a second asp process arriving mid-write.
-        upsertAlias(rcPath, home, entry("ccinner", "inner"));
+        upsertAlias(rcPath, host, entry("ccinner", "inner"));
         return block;
       }),
     ).toThrow(/is editing/);
@@ -213,13 +246,13 @@ describe("locking", () => {
   });
 
   test("releases the lock after a successful write", () => {
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
     expect(fs.existsSync(`${rcPath}.asp.lock`)).toBe(false);
   });
 
   test("releases the lock after a failed write", () => {
     fs.writeFileSync(rcPath, `${blockStartMarker(BLOCK_VERSION)}\n`);
-    expect(() => upsertAlias(rcPath, home, entry("ccwork", "work"))).toThrow();
+    expect(() => upsertAlias(rcPath, host, entry("ccwork", "work"))).toThrow();
     expect(fs.existsSync(`${rcPath}.asp.lock`)).toBe(false);
   });
 
@@ -228,7 +261,7 @@ describe("locking", () => {
     const old = Date.now() / 1000 - 60;
     fs.utimesSync(`${rcPath}.asp.lock`, old, old);
 
-    const result = upsertAlias(rcPath, home, entry("ccwork", "work"));
+    const result = upsertAlias(rcPath, host, entry("ccwork", "work"));
 
     expect(result.changed).toBe(true);
     expect(result.warnings.join(" ")).toMatch(/stale lock/);
@@ -238,7 +271,7 @@ describe("locking", () => {
 describe("inspection helpers", () => {
   test("finds an alias defined outside the block", () => {
     fs.writeFileSync(rcPath, `${RC_PROLOGUE}alias ccwork='something else'\n`);
-    upsertAlias(rcPath, home, entry("ccother", "other"));
+    upsertAlias(rcPath, host, entry("ccother", "other"));
 
     const content = fs.readFileSync(rcPath, "utf8");
     expect(findCollision(content, "ccwork")).toContain("something else");
@@ -246,11 +279,11 @@ describe("inspection helpers", () => {
   });
 
   test("reports entries whose profile directory is gone", () => {
-    upsertAlias(rcPath, home, entry("ccwork", "work"));
-    upsertAlias(rcPath, home, entry("cclive", "live"));
+    upsertAlias(rcPath, host, entry("ccwork", "work"));
+    upsertAlias(rcPath, host, entry("cclive", "live"));
     fs.mkdirSync(path.join(home, ".agent-switch-profiles", "claude", "live"), { recursive: true });
 
-    const orphans = findOrphanEntries(readBlock(rcPath, home));
+    const orphans = findOrphanEntries(readBlock(rcPath, host));
     expect(orphans.map((item) => item.alias)).toEqual(["ccwork"]);
   });
 });

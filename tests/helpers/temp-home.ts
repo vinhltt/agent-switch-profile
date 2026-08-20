@@ -4,9 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { STORE_DIR_NAME } from "../../src/paths";
+import { type HostPaths, hostPathsFor } from "../../src/shell/rc-block";
 
 export interface TempHome {
   home: string;
+  /** `hostPathsFor(home, "linux")` — the posix host most tests exercise. */
+  host: HostPaths;
   store: string;
   /** A pre-created `.bashrc`, since rc paths must pass the allowlist. */
   rcFile: string;
@@ -32,6 +35,7 @@ export function createTempHome(): TempHome {
 
   return {
     home,
+    host: hostPathsFor(home, "linux"),
     store: path.join(home, STORE_DIR_NAME),
     rcFile,
     cleanup(): void {

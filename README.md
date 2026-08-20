@@ -20,7 +20,34 @@ No daemon, no shim, no "current profile" to remember. The alias sets
 `CLAUDE_CONFIG_DIR` for that one command, so two terminals can run two accounts
 at once and nothing is left switched afterwards.
 
+## Support matrix
+
+| Harness | Status | Linux | macOS | Win (WSL) | Win (Git Bash) | Win (PS) |
+|---------|--------|:-----:|:-----:|:---------:|:--------------:|:--------:|
+| Claude Code | ✅ Supported | ✅ | 🧪 Beta | ✅ | ✅ | 🔜 Coming soon |
+| Codex CLI | 🔜 Coming soon | — | — | — | — | — |
+| GitHub Copilot CLI | 🔜 Coming soon | — | — | — | — | — |
+| Gemini CLI | 🔜 Coming soon | — | — | — | — | — |
+
 ## Install
+
+### Requirements
+
+Requires **Linux, WSL, or Windows with Git Bash**, and **bash or zsh**. Claude
+Code itself must already be installed (and on `PATH` — `create`/`list` warn if it
+is not).
+
+**On Windows**, run `asp` from **Git Bash**, not PowerShell or CMD: those are
+refused with an explanation rather than getting written syntax they cannot read.
+The install tarball ships `dist/cli.js` prebuilt, so Windows only needs Node, not
+Bun. WSL works too, as its own Linux install.
+
+macOS support is in beta — the core flow works with bash or zsh, but auth
+status shows as `unknown` (credentials live in Keychain, not on disk). Other
+shells (fish, csh) are out of scope for this release — `asp` refuses with an
+explanation rather than writing syntax your shell cannot read.
+
+### From source
 
 Not published to npm yet — install it from source. You need **git**, **Node 20.19
 or newer** to run it, and **[Bun](https://bun.sh) 1.2 or newer** to build it.
@@ -29,7 +56,7 @@ or newer** to run it, and **[Bun](https://bun.sh) 1.2 or newer** to build it.
 git clone https://github.com/vinhltt/agent-switch-profile.git
 cd agent-switch-profile
 bun install
-npm i -g "$(npm pack)"     # builds, packs, and installs the `asp` command
+npm i -g "$(npm pack | tail -1)"     # builds, packs, and installs the `asp` command
 ```
 
 `npm pack` runs the build for you, and the installed copy contains everything it
@@ -45,25 +72,8 @@ To update, pull and run the same install line again. To remove it:
 npm rm -g agent-switch-profile
 ```
 
-**Linking the clone instead**, if you are working on `asp` itself:
-
-```bash
-bun run build && npm i -g .
-```
-
-That points the global `asp` at your working tree, so a rebuild takes effect
-immediately — but the command breaks if you move or delete the clone, and
-`npm i -g .` does not build, so run `bun run build` yourself after each change.
-
 If you use nvm, `asp` lands in the Node version active at install time; switching
 versions hides it until you install it there too.
-
-Requires **Linux or WSL** and **bash or zsh**. Claude Code itself must already be
-installed.
-
-macOS, Windows without WSL, and other shells (fish, csh) are out of scope for
-this release — `asp` refuses with an explanation rather than writing syntax your
-shell cannot read.
 
 ## Commands
 
@@ -106,7 +116,7 @@ pipes cleanly:
 ```
 
 Warnings carry a `code` you can match on: `GLOBAL_CONFIG_DIR`, `ORPHAN_ALIAS`,
-`MISSING_ALIAS`, `INVALID_PROFILE`, `LOOSE_PERMISSIONS`.
+`MISSING_ALIAS`, `INVALID_PROFILE`, `LOOSE_PERMISSIONS`, `BINARY_NOT_FOUND`.
 
 ### `asp delete <name>`
 
@@ -136,7 +146,7 @@ directory back when it exits, so quit it and run `delete` again to be sure.
     └── personal/
 ```
 
-In your rc file:
+In your rc file, on Linux/WSL/macOS:
 
 ```bash
 # >>> asp managed block v1 >>>
@@ -144,9 +154,22 @@ alias ccwork='CLAUDE_CONFIG_DIR="$HOME/.agent-switch-profiles/claude/work" claud
 # <<< asp managed block v1 <<<
 ```
 
+On Windows (Git Bash), the path is absolute and uses `\`, not `$HOME` — a moved
+or renamed home would silently break a relative alias there, so `asp` writes the
+path Claude Code itself needs instead. The doubled backslashes are correct: it is
+one `\` per separator once the shell unquotes the line.
+
+```bash
+# >>> asp managed block v1 >>>
+alias ccwork='CLAUDE_CONFIG_DIR="C:\\Users\\vinh\\.agent-switch-profiles\\claude\\work" claude'
+# <<< asp managed block v1 <<<
+```
+
 The list of profiles is the set of directories on disk — there is no registry to
-fall out of sync. Directories are `0700` and files `0600`, because they hold
-OAuth credentials.
+fall out of sync. Directories are `0700` and files `0600` on Linux/WSL/macOS,
+because they hold OAuth credentials; Windows has no equivalent mode bits, so
+protection there comes from your user profile's inherited ACL instead — see
+Known limitations.
 
 ### Your rc file
 
@@ -189,12 +212,29 @@ warning. The aliases still win, because they set the variable per command.
 symlink that stays under `$HOME`, but will not write through one pointing
 elsewhere.
 
+**On Windows:**
+
+- **No `0700`/`0600` enforcement.** Node cannot set POSIX permission bits on
+  Windows; the profile store's protection comes entirely from the ACL your user
+  profile directory already inherits, not from anything `asp` sets.
+- **`delete` can only tell you *something* using this harness is running, not
+  which profile.** Reading another process's environment on Windows needs
+  `ReadProcessMemory`, which needs a native addon or debug rights — outside
+  `asp`'s scope — so the warning is a headcount, not a name.
+- **The alias holds an absolute path.** Renaming your Windows account or moving
+  your home directory breaks it; run `asp create <name>` again to regenerate it.
+- **Auth status stays `unknown` on Windows.** Whether `.credentials.json`
+  lands in the profile dir there, the way it does on Linux, has not been
+  confirmed through a real `/login` yet, so `list` reports `unknown` rather
+  than guess.
+
 ## Roadmap
 
-An npm release, so installing does not need a clone or Bun; other harnesses
-(codex, gemini, opencode) through the same adapter interface; macOS once Keychain
-isolation can be verified; an `asp exec <profile> -- <cmd>` form for scripts and
-cron.
+An npm release, so installing does not need a clone or Bun; the coming-soon
+harnesses from the support matrix (Codex CLI, GitHub Copilot CLI, Gemini CLI)
+through the same adapter interface; PowerShell support on Windows; full macOS
+support once Keychain isolation can be verified; an `asp exec <profile> -- <cmd>`
+form for scripts and cron.
 
 ## Development
 
@@ -207,6 +247,16 @@ bun run build      # dist/cli.js, runs under plain Node
 
 Integration tests spawn the built `dist/cli.js` under `node` in a temporary
 `HOME`, so a bundle that only works under Bun fails them.
+
+**Linking the clone**, so the global `asp` points at your working tree:
+
+```bash
+bun run build && npm i -g .
+```
+
+A rebuild then takes effect immediately — but the command breaks if you move or
+delete the clone, and `npm i -g .` does not build, so run `bun run build`
+yourself after each change.
 
 ## License
 

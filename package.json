@@ -1,8 +1,13 @@
 {
   "name": "agent-switch-profile",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Manage multiple Claude Code login profiles via isolated config dirs and shell aliases",
-  "keywords": ["claude-code", "profile", "cli", "multi-account"],
+  "keywords": [
+    "claude-code",
+    "profile",
+    "cli",
+    "multi-account"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,7 +20,9 @@
   "engines": {
     "node": ">=20.19"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "bun build src/cli.ts --outdir dist --target node --banner '#!/usr/bin/env node'",
     "prepack": "bun run build",

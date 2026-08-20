@@ -59,8 +59,19 @@ export function realpathAllowingMissing(target: string): string {
   }
 }
 
-function isContainedIn(parent: string, child: string): boolean {
-  return child === parent || child.startsWith(parent + path.sep);
+/**
+ * NTFS is case-insensitive, so win32 must not refuse `C:\Users\Vinh` under
+ * `C:\Users\vinh`. The separator is picked from `platform`, not the real
+ * `path.sep`, so this is testable on Linux for the win32 branch too.
+ */
+export function isContainedIn(parent: string, child: string, platform: NodeJS.Platform): boolean {
+  const sep = platform === "win32" ? path.win32.sep : path.posix.sep;
+  if (platform === "win32") {
+    const parentLower = parent.toLowerCase();
+    const childLower = child.toLowerCase();
+    return childLower === parentLower || childLower.startsWith(parentLower + sep);
+  }
+  return child === parent || child.startsWith(parent + sep);
 }
 
 /**
@@ -102,7 +113,11 @@ export interface ContainmentOptions {
  * Prove that `target` really lives inside the store and reaches it without
  * traversing a symlink, then return the path callers may act on.
  */
-export function assertInsideStore(target: string, options: ContainmentOptions = {}): string {
+export function assertInsideStore(
+  target: string,
+  options: ContainmentOptions = {},
+  platform: NodeJS.Platform = process.platform,
+): string {
   const root = storeRoot();
   const absolute = path.resolve(target);
 
@@ -120,7 +135,7 @@ export function assertInsideStore(target: string, options: ContainmentOptions = 
 
   // Containment must also survive symlinks resolved above the store root, e.g.
   // a home directory reached through one.
-  if (!isContainedIn(realpathAllowingMissing(root), realpathAllowingMissing(absolute))) {
+  if (!isContainedIn(realpathAllowingMissing(root), realpathAllowingMissing(absolute), platform)) {
     throw new ValidationError(`path escapes the profile store: ${target}`);
   }
 
@@ -140,8 +155,18 @@ export interface StoreRootPermissions {
   loose: boolean;
 }
 
-/** Returns null when the store root does not exist yet. */
-export function checkStoreRootPermissions(): StoreRootPermissions | null {
+/**
+ * Returns null when the store root does not exist yet, or on win32: Node
+ * fabricates a `stats.mode` on Windows (it does not track POSIX permission
+ * bits), so `mode & 0o077` is nonzero for effectively every file and the
+ * warning would fire on every `list`. Real protection there comes from the
+ * user profile's inherited ACL, not this check.
+ */
+export function checkStoreRootPermissions(
+  platform: NodeJS.Platform,
+): StoreRootPermissions | null {
+  if (platform === "win32") return null;
+
   let stats: fs.Stats;
   try {
     stats = fs.statSync(storeRoot());

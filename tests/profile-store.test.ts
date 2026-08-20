@@ -197,13 +197,17 @@ describe("listProfiles", () => {
     const created = create("work", "ccwork");
     fs.writeFileSync(path.join(created.dir, ".credentials.json"), "{}");
 
-    const original = process.platform;
-    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
-    try {
-      expect(detectAuthStatus(claudeAdapter, created.dir)).toBe("unknown");
-    } finally {
-      Object.defineProperty(process, "platform", { value: original, configurable: true });
-    }
+    expect(detectAuthStatus(claudeAdapter, created.dir, "darwin")).toBe("unknown");
+  });
+
+  // Manual smoke (plan phase 3) never exercised a real `/login`, so where
+  // `.credentials.json` lands on win32 is still unproven — stay unknown
+  // rather than guess it follows the linux layout.
+  test("does not guess auth status on win32 either", () => {
+    const created = create("work", "ccwork");
+    fs.writeFileSync(path.join(created.dir, ".credentials.json"), "{}");
+
+    expect(detectAuthStatus(claudeAdapter, created.dir, "win32")).toBe("unknown");
   });
 });
 

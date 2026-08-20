@@ -17,10 +17,17 @@ const RC_PROLOGUE = '# my shell config\nexport PATH="$PATH:/opt/bin"\nalias ll="
 
 let home: string;
 let rcPath: string;
+/** A stub `claude` on PATH, since the sandbox running these tests has no real one. */
+let binDir: string;
 
 beforeAll(() => {
   const build = spawnSync("bun", ["run", "build"], { cwd: projectRoot, encoding: "utf8" });
   if (build.status !== 0) throw new Error(`build failed: ${build.stderr}`);
+
+  binDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "asp-integration-bin-")));
+  const stub = path.join(binDir, "claude");
+  fs.writeFileSync(stub, "#!/usr/bin/env bash\n");
+  fs.chmodSync(stub, 0o755);
 });
 
 beforeEach(() => {
@@ -39,7 +46,13 @@ interface Run {
 function asp(...args: string[]): Run {
   const result = spawnSync("node", [cliPath, ...args], {
     cwd: home,
-    env: { ...process.env, HOME: home, SHELL: "/bin/bash", CLAUDE_CONFIG_DIR: undefined },
+    env: {
+      ...process.env,
+      HOME: home,
+      SHELL: "/bin/bash",
+      CLAUDE_CONFIG_DIR: undefined,
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
     // stdin closed on purpose: nothing may wait for input it cannot get.
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 15_000,
